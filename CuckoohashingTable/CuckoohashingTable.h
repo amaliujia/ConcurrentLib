@@ -16,12 +16,15 @@
 
 namespace concurrent_lib {
 
-template <typename KeyType, typename ValueType>
+template <typename KeyType,
+          typename ValueType,
+          class KeyEqualChekcer = std::equal_to<KeyType>>
 class CuckoohashingTable {
  private:
   Table table_;
-
+  KeyEqualChekcer keyEqualChekcer;
   typedef std::hash<KeyType> Hasher_;
+
 
  public:
   CuckoohashingTable() {}
@@ -33,20 +36,38 @@ class CuckoohashingTable {
     return CuckooLookup(key, indexes);
   }
 
+  // return true is inserting succeed.
+  // return false is finding a duplicate value.
+  // passing in rvalue.
+  bool Insert(KeyType&& key, ValueType&& value) {
+    return CuckooInsertLoop(key, value);
+  }
+
  private:
+  enum BucketInsertRetCode {
+    INSERT,
+    DUPLICATE,
+    EMPTY
+  };
+
   typedef std::pair<KeyType, ValueType> Cell;
   class Bucket {
   private:
     // std::array is as efficient as array initialized as [], where
     // std::array provides more functions to set and get data.
-    std::array<uint64_t, BUCKET_SIZE> hashesArray_;
+//    std::array<uint64_t, BUCKET_SIZE> hashesArray_;
     std::array<typename std::aligned_storage<
              sizeof(Cell), alignof(Cell)>::type,
              BUCKET_SIZE> Cells_;
     std::bitset<BUCKET_SIZE> occupied_;
   public:
-    bool IfOccupied(size_t i) {
+    inline bool IfOccupied(size_t i) {
       return occupied_[i];
+    }
+
+    inline const Cell& GetCell(size_t i) const {
+      return *static_cast<const Cell*>(
+      static_cast<const void*>(&Cells_[i]));
     }
   };
 
@@ -77,7 +98,7 @@ class CuckoohashingTable {
     Bucket *buckets_;
   };
 
-  inline size_t GetHashValue(KeyType key) const {
+  inline size_t GetHashValue(const KeyType& key) const {
     return Hasher_(key);
   }
 
@@ -85,7 +106,7 @@ class CuckoohashingTable {
     const size_t curTableSize = table_.GetTableSize();
     size_t pos1 = hashValue % curTableSize;
     // 0xc6a4a7935bd1e995 is the hash constant from 64-bit MurmurHash2
-    size_t pos2 = (hashValue & 0xffff) * 0xc6a4a7935bd1e995 % curTableSize;
+    size_t pos2 = (hashValue & 0xf) * 0xc6a4a7935bd1e995 % curTableSize;
 
     return std::pair<size_t, size_t>(pos1, pos2);
   };
@@ -99,6 +120,9 @@ class CuckoohashingTable {
       }
 
       // compare keys
+      if (keyEqualChekcer(bucket.GetCell(i).first, key) == true) {
+        return true;
+      }
     }
 
     return false;
@@ -115,6 +139,46 @@ class CuckoohashingTable {
     }
 
     return false;
+  }
+
+  BucketInsertRetCode InsertOneBucket(size_t index, KeyType&& key, ValueType&& value) {
+
+  }
+
+  bool CuckooInsertLoop(KeyType&& key, ValueType&& value) {
+    const size_t hashValue = GetHashValue(key);
+    auto indexes = GetTwoIndexes(hashValue);
+
+    BucketInsertRetCode code;
+
+    code = InsertOneBucket(indexes.first,
+                         std::forward<KeyType>(key),
+                         std::forward<ValueType>(value));
+    if (code == BucketInsertRetCode::INSERT) {
+      return true;
+    }
+
+    if (code == BucketInsertRetCode::DUPLICATE) {
+      return false;
+    }
+
+    code = InsertOneBucket(indexes.second,
+                           std::forward<KeyType>(key),
+                           std::forward<ValueType>(value))
+
+    if (code == BucketInsertRetCode::INSERT) {
+      return true;
+    }
+
+    if (code == BucketInsertRetCode::DUPLICATE) {
+      return false;
+    }
+
+
+    // Cuckoo search path and cuckoo move
+
+
+    // resize
   }
 };
 
