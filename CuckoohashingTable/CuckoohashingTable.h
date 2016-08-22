@@ -21,9 +21,11 @@ template <typename KeyType,
           class KeyEqualChekcer = std::equal_to<KeyType>>
 class CuckoohashingTable {
  private:
-  Table table_;
-  KeyEqualChekcer keyEqualChekcer;
-  typedef std::hash<KeyType> Hasher_;
+    Table table_;
+
+    KeyEqualChekcer keyEqualChekcer;
+
+    typedef std::hash<KeyType> Hasher_;
 
 
  public:
@@ -109,7 +111,7 @@ class CuckoohashingTable {
     size_t pos2 = (hashValue & 0xf) * 0xc6a4a7935bd1e995 % curTableSize;
 
     return std::pair<size_t, size_t>(pos1, pos2);
-  };
+  }
 
   bool LookupOneBucket(const KeyType& key, size_t index) {
     Bucket& bucket = table_.GetBucket(index);
@@ -164,7 +166,7 @@ class CuckoohashingTable {
 
     code = InsertOneBucket(indexes.second,
                            std::forward<KeyType>(key),
-                           std::forward<ValueType>(value))
+                           std::forward<ValueType>(value));
 
     if (code == BucketInsertRetCode::INSERT) {
       return true;
@@ -180,6 +182,32 @@ class CuckoohashingTable {
 
     // resize
   }
+
+  inline size_t TableSize(size_t tableSizeBase) {
+      return size_t(1) << tableSizeBase;
+  }
+
+  inline size_t HashMask(size_t tableSizeBase) {
+      return TableSize(tableSizeBase) - 1;
+  }
+
+  inline char PartialHashValue(size_t hashValue) {
+      return (char)(hashValue >> (sizeof(size_t) - sizeof(char)) * 8);
+  }
+
+  inline size_t IndexOff(size_t tableSizeBase, size_t hashValue) {
+      return hashValue & HashMask(tableSizeBase);
+  }
+
+  inline size_t AlternativeIndexOff(size_t tableSizeBase, size_t partialHashValue, size_t pos) {
+      char nonZeroTag = (partialHashValue >> 1 << 1) + 1;
+      size_t hashOfTag = static_cast<size_t >(nonZeroTag * 0xc6a4a7935bd1e995);
+      return (pos ^ hashOfTag) & HashMask(tableSizeBase);
+  }
+
+  std::pair<size_t, size_t> TwoBucketsPos(size_t hashValue) {
+
+  };
 };
 
 }  // namespace concurrent_lib
