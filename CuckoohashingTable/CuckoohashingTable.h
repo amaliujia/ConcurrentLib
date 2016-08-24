@@ -6,9 +6,11 @@
 #define CONCURRENTLIB_CUCOOHASHINGTABLE_H
 
 #include <array>
+#include <vector>
 #include <functional>
 #include <utility>
 #include <bitset>
+#include <mutex>
 
 #define BUCKET_SIZE 4
 #define BUCKET_NUM  512
@@ -18,23 +20,16 @@ namespace concurrent_lib {
 
 template <typename KeyType,
           typename ValueType,
+          class KeyHahser = std::hash<KeyType>,
           class KeyEqualChekcer = std::equal_to<KeyType>>
 class CuckoohashingTable {
- private:
-    Table table_;
-
-    KeyEqualChekcer keyEqualChekcer;
-
-    typedef std::hash<KeyType> Hasher_;
-
-
  public:
-  CuckoohashingTable() {}
+  CuckoohashingTable():table_(BUCKET_NUM) {
+    locks_.resize(BUCKET_NUM);
+  }
   ~CuckoohashingTable() {}
 
   bool Lookup(const KeyType& key) {
-    const size_t hashValue = GetHashValue(key);
-    auto indexes = GetTwoIndexes(hashValue);
     return CuckooLookup(key, indexes);
   }
 
@@ -51,6 +46,48 @@ class CuckoohashingTable {
     DUPLICATE,
     EMPTY
   };
+
+
+  class Spinlock {
+  private:
+    std::atomic_flag lock_;
+  public:
+    Spinlock() {
+      lock_.clear();
+    }
+
+    inline void lock() {
+      while (lock_.test_and_set(std::memory_order_acquire));
+    }
+
+    inline void unlock() {
+      lock_.clear(std::memory_order_release);
+    }
+
+    inline bool try_lock() {
+      return !lock_.test_and_set(std::memory_order_acquire);
+    }
+
+  } __attribute__((aligned(64)));
+
+
+  class Mutexlock {
+  private:
+    std::mutex lock_;
+
+  public:
+    inline void lock() {
+      lock_.lock();
+    }
+
+    inline void unlock() {
+      lock_.unlock();
+    }
+
+    inline bool try_lock() {
+      return lock_.try_lock();
+    }
+  }__attribute__((aligned(64)));
 
   typedef std::pair<KeyType, ValueType> Cell;
   class Bucket {
@@ -75,8 +112,9 @@ class CuckoohashingTable {
 
   class Table {
    public:
-    Table() {
-      buckets_ = new Bucket[BUCKET_NUM];
+    Table(size_t sizeBase): sizeBase_(sizeBase) {
+      size_t size = size_t(1) << sizeBase;
+      buckets_ = new Bucket[size];
     }
 
     ~Table() {
@@ -84,7 +122,11 @@ class CuckoohashingTable {
     }
 
     inline size_t GetTableSize() const {
-      return BUCKET_NUM;
+      return size_t(1) << sizeBase_.load(std::memory_order_acquire);
+    }
+
+    inline size_t GetTableSizeBase() {
+      return sizeBase_.load(std::memory_order_acquire);
     }
 
     Bucket& GetBucket(size_t index) {
@@ -96,7 +138,7 @@ class CuckoohashingTable {
       delete[] buckets_;
     }
 
-
+    std::atomic<size_t> sizeBase_;
     Bucket *buckets_;
   };
 
@@ -149,7 +191,16 @@ class CuckoohashingTable {
 
   bool CuckooInsertLoop(KeyType&& key, ValueType&& value) {
     const size_t hashValue = GetHashValue(key);
-    auto indexes = GetTwoIndexes(hashValue);
+
+    while (true) {
+      auto indexes = TwoBucketsPos(hashValue);
+      if (!LockTwo(table_.GetTableSizeBase(), indexes.first, indexes.second)) {
+        continue;
+      }
+
+    }
+      // Acquired two locks, start insert now.
+    }
 
     BucketInsertRetCode code;
 
@@ -199,15 +250,39 @@ class CuckoohashingTable {
       return hashValue & HashMask(tableSizeBase);
   }
 
-  inline size_t AlternativeIndexOff(size_t tableSizeBase, size_t partialHashValue, size_t pos) {
+  inline size_t AlternativeIndexOff(size_t tableSizeBase, char partialHashValue, size_t pos) {
       char nonZeroTag = (partialHashValue >> 1 << 1) + 1;
       size_t hashOfTag = static_cast<size_t >(nonZeroTag * 0xc6a4a7935bd1e995);
       return (pos ^ hashOfTag) & HashMask(tableSizeBase);
   }
 
   std::pair<size_t, size_t> TwoBucketsPos(size_t hashValue) {
-
+    size_t posFirst = IndexOff(table_.GetTableSizeBase(), hashValue);
+    char paritial = PartialHashValue(hashValue);
+    size_t posSecond = AlternativeIndexOff(table_.GetTableSizeBase(), paritial, posFirst);
+    return std::pair<size_t, size_t>(posFirst, posSecond);
   };
+
+  bool LockTwo(size_t tableSizeBase, size_t posFirst, size_t posSecond) {
+    locks_[posFirst].lock();
+    if (table_.GetTableSizeBase() != tableSizeBase) {
+      locks_[posFirst].unlock();
+      return false;
+    }
+
+    locks_[posSecond].lock();
+
+    return true;
+  }
+
+private:
+    Table table_;
+
+    KeyEqualChekcer keyEqualChekcer;
+
+    typedef KeyHahser Hasher_;
+
+    std::vector<Spinlock> locks_;
 };
 
 }  // namespace concurrent_lib
