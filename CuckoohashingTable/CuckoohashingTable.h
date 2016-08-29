@@ -11,6 +11,7 @@
 #include <utility>
 #include <bitset>
 #include <mutex>
+#include <atomic>
 
 #define BUCKET_SIZE 4
 #define BUCKET_NUM  512
@@ -30,7 +31,7 @@ class CuckoohashingTable {
   ~CuckoohashingTable() {}
 
   bool Lookup(const KeyType& key) {
-    return CuckooLookup(key, indexes);
+      return CuckooLookupLoop(key);
   }
 
   // return true is inserting succeed.
@@ -42,9 +43,10 @@ class CuckoohashingTable {
 
  private:
   enum BucketInsertRetCode {
+    OK,
     INSERT,
     DUPLICATE,
-    EMPTY
+    FULL
   };
 
 
@@ -94,19 +96,31 @@ class CuckoohashingTable {
   private:
     // std::array is as efficient as array initialized as [], where
     // std::array provides more functions to set and get data.
-//    std::array<uint64_t, BUCKET_SIZE> hashesArray_;
+    std::array<char, BUCKET_SIZE> hashesArray_;
     std::array<typename std::aligned_storage<
              sizeof(Cell), alignof(Cell)>::type,
              BUCKET_SIZE> Cells_;
     std::bitset<BUCKET_SIZE> occupied_;
   public:
-    inline bool IfOccupied(size_t i) {
+    inline bool IfOccupied(size_t i)  {
       return occupied_[i];
     }
 
-    inline const Cell& GetCell(size_t i) const {
-      return *static_cast<const Cell*>(
-      static_cast<const void*>(&Cells_[i]));
+    inline Cell& GetCell(size_t i) {
+      return *static_cast<Cell*>(
+      static_cast<void*>(&Cells_[i]));
+    }
+
+    inline void SetPartialKey(size_t i, char paritialKey) {
+      hashesArray_[i] = paritialKey;
+    }
+
+    inline void SetOccupiedBit(size_t i) {
+      occupied_.set(i);
+    }
+
+    inline void SetKeyValue(size_t i, KeyType&& key, ValueType&& value) {
+      new (&Cells_[i]) Cell(std::move(key), std::move(value));
     }
   };
 
@@ -172,6 +186,11 @@ class CuckoohashingTable {
     return false;
   }
 
+  bool CuckooLookupLoop(const KeyType& key) {
+      auto indexes = TwoBucketsPos(GetHashValue(key));
+      return CuckooLookup(key, indexes);
+  }
+
   bool CuckooLookup(const KeyType& key,
                     const std::pair<size_t, size_t>& indexes) {
     if (LookupOneBucket(key, indexes.first)) {
@@ -185,8 +204,42 @@ class CuckoohashingTable {
     return false;
   }
 
-  BucketInsertRetCode InsertOneBucket(size_t index, KeyType&& key, ValueType&& value) {
+  BucketInsertRetCode InsertOneBucket(size_t index, char paritialKey, KeyType&& key, ValueType&& value) {
+      Bucket& bucket = table_.GetBucket(index);
 
+      for (size_t i = 0; i < BUCKET_SIZE; i++) {
+          if (!bucket.IfOccupied(i)) {
+            bucket.SetOccupiedBit(i);
+            bucket.SetPartialKey(i, paritialKey);
+            bucket.SetKeyValue(i, std::forward(key), std::forward(value));
+            return BucketInsertRetCode::INSERT;
+          }
+      }
+
+      return BucketInsertRetCode::FULL;
+  }
+
+  BucketInsertRetCode CheckDuplicate(size_t index_first, size_t index_second, const KeyType& key) {
+    Bucket &bucket_first = table_.GetBucket(index_first);
+    Bucket &bucket_second = table_.GetBucket(index_second);
+
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+      if (bucket_first.IfOccupied(i)) {
+        Cell &cell = bucket_first.GetCell(i);
+        if (keyEqualChekcer(cell.first, key)) {
+          return BucketInsertRetCode::DUPLICATE;
+        }
+      }
+
+      if (bucket_second.IfOccupied(i)) {
+        Cell &cell = bucket_second.GetCell(i);
+        if (keyEqualChekcer(cell.first, key)) {
+          return BucketInsertRetCode::DUPLICATE;
+        }
+      }
+    }
+
+    return BucketInsertRetCode::OK;
   }
 
   bool CuckooInsertLoop(KeyType&& key, ValueType&& value) {
@@ -198,40 +251,36 @@ class CuckoohashingTable {
         continue;
       }
 
-    }
       // Acquired two locks, start insert now.
+      BucketInsertRetCode code;
+
+      code = CheckDuplicate(indexes.first, indexes.second, key);
+
+      if (code == BucketInsertRetCode::OK) {
+        return false;
+      }
+
+      code = InsertOneBucket(indexes.first,
+                             PartialHashValue(hashValue),
+                             std::forward<KeyType>(key),
+                             std::forward<ValueType>(value));
+      if (code == BucketInsertRetCode::INSERT) {
+        return true;
+      }
+
+      code = InsertOneBucket(indexes.second,
+                             PartialHashValue(hashValue),
+                             std::forward<KeyType>(key),
+                             std::forward<ValueType>(value));
+
+      if (code == BucketInsertRetCode::INSERT) {
+        return true;
+      }
+
+      // Cuckoo search path and cuckoo move
+
+      // resize
     }
-
-    BucketInsertRetCode code;
-
-    code = InsertOneBucket(indexes.first,
-                         std::forward<KeyType>(key),
-                         std::forward<ValueType>(value));
-    if (code == BucketInsertRetCode::INSERT) {
-      return true;
-    }
-
-    if (code == BucketInsertRetCode::DUPLICATE) {
-      return false;
-    }
-
-    code = InsertOneBucket(indexes.second,
-                           std::forward<KeyType>(key),
-                           std::forward<ValueType>(value));
-
-    if (code == BucketInsertRetCode::INSERT) {
-      return true;
-    }
-
-    if (code == BucketInsertRetCode::DUPLICATE) {
-      return false;
-    }
-
-
-    // Cuckoo search path and cuckoo move
-
-
-    // resize
   }
 
   inline size_t TableSize(size_t tableSizeBase) {
@@ -273,6 +322,9 @@ class CuckoohashingTable {
     locks_[posSecond].lock();
 
     return true;
+  }
+
+  void LockAll() {
   }
 
 private:
