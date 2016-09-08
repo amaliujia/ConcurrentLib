@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.5)
 project(ConcurrentLib)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+
+# debug
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -ggdb")
 
 # The version number.
 set (Tutorial_VERSION_MAJOR 1)
@@ -30,3 +33,9 @@ target_link_libraries(ConcurrentLib CuckoohashingTable)
 # add math functions
 add_subdirectory(MathFunctions)
 add_subdirectory(CuckoohashingTable)
+
+# tests
+add_subdirectory(tests)
+
+# libs
+add_subdirectory(libs/googlemock)
