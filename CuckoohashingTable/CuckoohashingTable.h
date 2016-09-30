@@ -50,12 +50,11 @@ class CuckoohashingTable {
   enum BucketInsertRetCode {
     OK,
     INSERT,
-    DUPLICATE,
-    FULL
+    DUPLICATE
   };
 
   enum CuckooPathCode {
-    OK,
+    GOOD,
     FULL,
     MAXSTEP
   };
@@ -201,6 +200,13 @@ class CuckoohashingTable {
       return buckets_[index];
     }
 
+    class CuckooPathNode {
+    private:
+      TwoBucketMetadata *metadata;
+
+
+    };
+
    private:
     void DeallocMem() {
       delete[] buckets_;
@@ -287,6 +293,10 @@ class CuckoohashingTable {
   }
 
 
+  inline CuckooPathCode SearchCuckooPath() {
+
+  }
+
   bool CuckooInsertLoop(KeyType&& key, ValueType&& value) {
     const size_t hashValue = GetHashValue(key);
 
@@ -326,9 +336,10 @@ class CuckoohashingTable {
                         std::forward<ValueType>(value));
       } else {
 
-      // Cuckoo search path and cuckoo move
-      // If done this part, then insert is done.
-      // else need to resize table
+        // Cuckoo search path and cuckoo move
+        // If done this part, then insert is done.
+        // else need to resize table
+        // May need RELEASE locks above.
         while (true) {
 
           // resize
