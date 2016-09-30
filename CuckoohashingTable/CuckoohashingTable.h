@@ -26,7 +26,8 @@ template <typename KeyType,
 class CuckoohashingTable {
  public:
   CuckoohashingTable():table_(BUCKET_NUM) {
-    locks_.resize(BUCKET_NUM);
+    //TODO: resize the lock
+    // locks_.resize(BUCKET_NUM);
   }
   ~CuckoohashingTable() {}
 
@@ -52,6 +53,13 @@ class CuckoohashingTable {
     DUPLICATE,
     FULL
   };
+
+  enum CuckooPathCode {
+    OK,
+    FULL,
+    MAXSTEP
+  };
+
 
 
   class Spinlock {
@@ -150,7 +158,25 @@ class CuckoohashingTable {
       this->~BucketMetadata();
       map = nullptr;
     }
+
+    void inline AddBucket(size_t i, size_t bucketPos) {
+      if (i >= N) {
+        // log error
+      } else {
+        indexes[i] = bucketPos;
+      }
+    }
+
+    size_t inline GetN(size_t i) {
+      if (i >= N) {
+        // log error
+      } else {
+        return indexes[i];
+      }
+    }
   };
+
+  typedef BucketMetadata<2> TwoBucketMetadata;
 
   class Table {
    public:
@@ -237,7 +263,7 @@ class CuckoohashingTable {
 
     bucket.SetOccupiedBit(i);
     bucket.SetPartialKey(i, paritialKey);
-    bucket.SetKeyValue(i, std::forward(key), std::forward(value));
+    bucket.SetKeyValue(i, std::forward<KeyType>(key), std::forward<ValueType>(value));
 
     return BucketInsertRetCode::INSERT;
   }
@@ -259,6 +285,7 @@ class CuckoohashingTable {
 
     return BucketInsertRetCode::OK;
   }
+
 
   bool CuckooInsertLoop(KeyType&& key, ValueType&& value) {
     const size_t hashValue = GetHashValue(key);
@@ -290,20 +317,27 @@ class CuckoohashingTable {
                         PartialHashValue(hashValue),
                         std::forward<KeyType>(key),
                         std::forward<ValueType>(value));
-        return true;
-      }
 
-      if (index2 != -1) {
+      } else if (index2 != -1) {
         InsertOneBucket(index2,
                         indexes.second,
                         PartialHashValue(hashValue),
                         std::forward<KeyType>(key),
                         std::forward<ValueType>(value));
-      }
+      } else {
 
       // Cuckoo search path and cuckoo move
+      // If done this part, then insert is done.
+      // else need to resize table
+        while (true) {
 
-      // resize
+          // resize
+        }
+      }
+
+      // Release the acquired locks at the beginning of loop.
+      UnlockTwo(indexes.first, indexes.second);
+      return true;
     }
   }
 
@@ -336,6 +370,18 @@ class CuckoohashingTable {
     return std::pair<size_t, size_t>(posFirst, posSecond);
   };
 
+  TwoBucketMetadata TwoBucketsPosMetadata(size_t hashValue) {
+    size_t posFirst = IndexOff(table_.GetTableSizeBase(), hashValue);
+    char paritial = PartialHashValue(hashValue);
+    size_t posSecond = AlternativeIndexOff(table_.GetTableSizeBase(), paritial, posFirst);
+
+    TwoBucketMetadata metadata;
+    metadata.AddBucket(0, posFirst);
+    metadata.AddBucket(1, posSecond);
+
+    return metadata;
+  };
+
   bool LockTwo(size_t tableSizeBase, size_t posFirst, size_t posSecond) {
     locks_[posFirst].lock();
     if (table_.GetTableSizeBase() != tableSizeBase) {
@@ -348,10 +394,32 @@ class CuckoohashingTable {
     return true;
   }
 
+  bool UnlockTwo(size_t posFirst, size_t posSecond) {
+    locks_[posFirst].unlock();
+    locks_[posSecond].unlock();
+  }
+
+  bool Unlock(TwoBucketMetadata& twoBucketMetadata) {
+    locks_[twoBucketMetadata.GetN(0)].unlock();
+    locks_[twoBucketMetadata.GetN(1)].unlock();
+  }
+
+  bool LockTwo(size_t tableSizeBase, TwoBucketMetadata& twoBucketMetadata) {
+    locks_[twoBucketMetadata.GetN(0)].lock();
+    if (table_.GetTableSizeBase() != tableSizeBase) {
+      locks_[twoBucketMetadata.GetN(0)].unlock();
+      return false;
+    }
+
+    locks_[twoBucketMetadata.GetN(1)].lock();
+
+    return true;
+  }
+
   void LockAll() {
   }
 
-  void Unlock(size_t i) {
+  void inline Unlock(size_t i) {
     locks_[i].unlock();
   }
 
@@ -362,9 +430,7 @@ private:
 
     typedef KeyHahser Hasher_;
 
-    std::vector<Spinlock> locks_;
-
-    typedef BucketMetadata<2> TwoBucketMetadata;
+    std::array<Spinlock, BUCKET_NUM> locks_;
 };
 }  // namespace concurrent_lib
 
