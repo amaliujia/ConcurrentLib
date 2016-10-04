@@ -12,6 +12,7 @@
 #include <bitset>
 #include <mutex>
 #include <atomic>
+#include <memory>
 
 #define BUCKET_SIZE 4
 #define BUCKET_NUM  512
@@ -56,7 +57,8 @@ class CuckoohashingTable {
   enum CuckooPathCode {
     GOOD,
     FULL,
-    MAXSTEP
+    MAXSTEP,
+    RESIZE
   };
 
 
@@ -143,15 +145,11 @@ class CuckoohashingTable {
   class BucketMetadata {
   private:
     std::array<size_t, N> indexes;
-
+    size_t tableSize;
     CuckoohashingTable *map;
   public:
     BucketMetadata() {}
-    ~BucketMetadata() {
-      for (auto i : indexes) {
-        map->Unlock(i);
-      }
-    }
+    ~BucketMetadata() {}
 
     void inline Release() {
       this->~BucketMetadata();
@@ -163,6 +161,24 @@ class CuckoohashingTable {
         // log error
       } else {
         indexes[i] = bucketPos;
+      }
+    }
+
+    void inline AddTableSize(size_t i) {
+      tableSize = i;
+    }
+
+    bool Lock() {
+      if (N == 2) {
+        return map->LockTwo(tableSize, indexes[0], indexes[1]);
+      }
+
+      return false;
+    }
+
+    void Unlock() {
+      if (N == 2) {
+        map->UnlockTwo(indexes[0], indexes[1]);
       }
     }
 
@@ -202,9 +218,27 @@ class CuckoohashingTable {
 
     class CuckooPathNode {
     private:
-      TwoBucketMetadata *metadata;
+      std::unique_ptr<TwoBucketMetadata> metadataPtr;
+
+    public:
+      CuckooPathNode(size_t i, size_t j) {
+        metadataPtr = new TwoBucketMetadata();
+        metadataPtr->AddBucket(0, i);
+        metadataPtr->AddBucket(1, j);
+      }
+
+      CuckooPathCode Swap() {
+        if (metadataPtr->Lock() == false) {
+          // If metadata lock fail, means table is been resize in this table
+          // In this case, all the key are remapped already.
+          // So cannot continue, must redo the insert.
+          return RESIZE;
+        }
 
 
+
+        metadataPtr->Unlock();
+      }
     };
 
    private:
