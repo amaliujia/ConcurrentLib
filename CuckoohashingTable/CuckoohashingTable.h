@@ -106,6 +106,9 @@ class CuckoohashingTable {
     }
   }__attribute__((aligned(64)));
 
+  // exceptions
+  class TableSizeException {};
+
   typedef std::pair<KeyType, ValueType> Cell;
   class Bucket {
   private:
@@ -398,64 +401,68 @@ class CuckoohashingTable {
     const size_t hashValue = GetHashValue(key);
 
     while (true) {
-      auto indexes = SnapshotAndLockTwo(hashValue);
+      try {
+        auto indexes = SnapshotAndLockTwo(hashValue);
 
-      // Acquired two locks, start insert now.
-      BucketInsertRetCode code;
-      int index1, index2;
-      code = CheckDuplicateBucket(indexes.GetN(0), key, index1);
+        // Acquired two locks, start insert now.
+        BucketInsertRetCode code;
+        int index1, index2;
+        code = CheckDuplicateBucket(indexes.GetN(0), key, index1);
 
-      if (code == BucketInsertRetCode::DUPLICATE) {
-        return false;
-      }
-
-      code = CheckDuplicateBucket(indexes.GetN(1), key, index1);
-
-      if (code == BucketInsertRetCode::DUPLICATE) {
-        return false;
-      }
-
-      if (index1 != -1) {
-        InsertOneBucket(index1,
-                        indexes.GetN(0),
-                        PartialHashValue(hashValue),
-                        std::forward<KeyType>(key),
-                        std::forward<ValueType>(value));
-
-      } else if (index2 != -1) {
-        InsertOneBucket(index2,
-                        indexes.GetN(1),
-                        PartialHashValue(hashValue),
-                        std::forward<KeyType>(key),
-                        std::forward<ValueType>(value));
-      } else {
-
-        // Cuckoo search path and cuckoo move
-        // If done this part, then insert is done.
-        // else need to resize table
-        // Has to RELEASE locks above.
-
-        // release locks
-        indexes.Release();
-
-        CuckooPathCode code = SearchCuckooPath(indexes.GetTableSize());
-
-        if (code == MAXSTEP || code == FULL) {
-          // do resize
-          // and the throw a exception to restart
-          // but how to make sure multi threads reszie the table at the same time.
-          // hint: do check on tableSize when acquire all locks.
-
-        } else if (code == GOOD) {
-           SwapCuckooPath();
-        } else {
-          // what chould this one be?
+        if (code == BucketInsertRetCode::DUPLICATE) {
+          return false;
         }
-      }
 
-      // Release the acquired locks at the beginning of loop.
-      indexes.Release();
-      return true;
+        code = CheckDuplicateBucket(indexes.GetN(1), key, index1);
+
+        if (code == BucketInsertRetCode::DUPLICATE) {
+          return false;
+        }
+
+        if (index1 != -1) {
+          InsertOneBucket(index1,
+                          indexes.GetN(0),
+                          PartialHashValue(hashValue),
+                          std::forward<KeyType>(key),
+                          std::forward<ValueType>(value));
+
+        } else if (index2 != -1) {
+          InsertOneBucket(index2,
+                          indexes.GetN(1),
+                          PartialHashValue(hashValue),
+                          std::forward<KeyType>(key),
+                          std::forward<ValueType>(value));
+        } else {
+
+          // Cuckoo search path and cuckoo move
+          // If done this part, then insert is done.
+          // else need to resize table
+          // Has to RELEASE locks above.
+
+          // release locks
+          indexes.Release();
+
+          CuckooPathCode code = SearchCuckooPath(indexes.GetTableSize(), indexes);
+
+          if (code == MAXSTEP || code == FULL) {
+            // do resize
+            // and the throw a exception to restart
+            // but how to make sure multi threads reszie the table at the same time.
+            // hint: do check on tableSize when acquire all locks.
+
+          } else if (code == GOOD) {
+            SwapCuckooPath();
+          } else {
+            // what chould this one be?
+          }
+        }
+
+        // Release the acquired locks at the beginning of loop.
+        indexes.Release();
+        return true;
+      } catch(TableSizeException) {
+
+      }
     }
   }
 
