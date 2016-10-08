@@ -50,14 +50,10 @@ class CuckoohashingTable {
   }
 
  private:
-  enum BucketInsertRetCode {
+  enum CuckooStatusCode {
     OK,
     INSERT,
-    DUPLICATE
-  };
-
-  enum CuckooPathCode {
-    GOOD,
+    DUPLICATE,
     FULL,
     MAXSTEP,
     RESIZE
@@ -124,6 +120,10 @@ class CuckoohashingTable {
       return occupied_[i];
     }
 
+    inline char GetPartitialKey(size_t i) {
+      return hashesArray_[i];
+    }
+
     inline Cell& GetCell(size_t i) {
       return *static_cast<Cell*>(
       static_cast<void*>(&Cells_[i]));
@@ -158,33 +158,39 @@ class CuckoohashingTable {
   template <size_t N>
   class BucketMetadata {
   private:
+    static_assert(N >= 1 && N <= 3, "BucketMetadata should only be used"
+    " for between 1 and 3 locks");
+
     std::array<size_t, N> indexes;
     size_t tableSize;
-    CuckoohashingTable *map;
+    CuckoohashingTable *map_;
   public:
     BucketMetadata() {}
+
+    template <typename... Args>
+    BucketMetadata(CuckoohashingTable* map, Args&&... inds)
+    : map_(map), indexes{{inds...}} {}
+
     BucketMetadata(const BucketMetadata& bucketMetadata) {
-      tableSize = bucketMetadata.GetTableSize();
+      tableSize = bucketMetadata.GetTableSizeBase();
       for (int i = 0; i < N; i++) {
         indexes[i] = bucketMetadata.GetN(i);
       }
-      map = bucketMetadata.GetMapPtr();
+      map_ = bucketMetadata.GetMapPtr();
     }
     ~BucketMetadata() {
       // Has been called Release() somewhere
-      if (map == nullptr) {
+      if (map_ == nullptr) {
         return;
       }
 
-      for (int i = 0; i < N; i++) {
-        map->Unlock(indexes[i]);
-      }
-      map = nullptr;
+      Unlock();
+      map_ = nullptr;
     }
 
     inline void Release() {
       this->~BucketMetadata();
-      map = nullptr;
+      map_ = nullptr;
     }
 
     inline void AddBucket(size_t i, size_t bucketPos) {
@@ -200,33 +206,29 @@ class CuckoohashingTable {
     }
 
     inline CuckoohashingTable* GetMapPtr() const {
-      return map;
+      return map_;
     }
 
-    inline size_t GetTableSize() const {
+    inline size_t GetTableSizeBase() const {
       return tableSize;
     }
 
-    bool Lock() {
+    inline bool Lock() {
       if (N == 2) {
-        return map->LockTwo(tableSize, indexes[0], indexes[1]);
+        return map_->LockTwo(tableSize, indexes[0], indexes[1]);
       }
 
       return false;
     }
 
-    void Unlock() {
-      if (N == 2) {
-        map->UnlockTwo(indexes[0], indexes[1]);
+    inline void Unlock() {
+      for (int i = 0; i < N; i++) {
+        map_->Unlock(indexes[i]);
       }
     }
 
     size_t inline GetN(size_t i) const {
-      if (i >= N) {
-        // log error
-      } else {
         return indexes[i];
-      }
     }
   };
 
@@ -267,17 +269,17 @@ class CuckoohashingTable {
         metadataPtr->AddTableSize(size);
       }
 
-      CuckooPathCode Swap() {
+      CuckooStatusCode Swap() {
         if (metadataPtr->Lock() == false) {
           // If metadata lock fail, means table is been resize in this table
           // In this case, all the key are remapped already.
           // So cannot continue, must redo the insert.
-          return RESIZE;
+          return CuckooStatusCode::RESIZE;
         }
 
 
         metadataPtr->Unlock();
-        return GOOD;
+        return CuckooStatusCode::OK;
       }
     };
 
@@ -342,17 +344,17 @@ class CuckoohashingTable {
     return false;
   }
 
-  BucketInsertRetCode InsertOneBucket(size_t i, size_t index, char paritialKey, KeyType&& key, ValueType&& value) {
+  CuckooStatusCode InsertOneBucket(size_t i, size_t index, char paritialKey, KeyType&& key, ValueType&& value) {
       Bucket& bucket = table_.GetBucket(index);
 
     bucket.SetOccupiedBit(i);
     bucket.SetPartialKey(i, paritialKey);
     bucket.SetKeyValue(i, std::forward<KeyType>(key), std::forward<ValueType>(value));
 
-    return BucketInsertRetCode::INSERT;
+    return CuckooStatusCode::INSERT;
   }
 
-  BucketInsertRetCode CheckDuplicateBucket(size_t index_first, const KeyType& key, int& index) {
+  CuckooStatusCode CheckDuplicateBucket(size_t index_first, const KeyType& key, int& index) {
     Bucket &bucket_first = table_.GetBucket(index_first);
 
     index = -1;
@@ -360,40 +362,63 @@ class CuckoohashingTable {
       if (bucket_first.IfOccupied(i)) {
         Cell &cell = bucket_first.GetCell(i);
         if (keyEqualChekcer(cell.first, key)) {
-          return BucketInsertRetCode::DUPLICATE;
+          return CuckooStatusCode::DUPLICATE;
         }
       } else if (index == -1) {
         index = i;
       }
     }
 
-    return BucketInsertRetCode::OK;
+    return CuckooStatusCode::OK;
   }
 
 
-  inline CuckooPathCode SearchCuckooPath(size_t tableSize, const TwoBucketMetadata& startBucket) {
+  inline CuckooStatusCode SearchCuckooPath(size_t tableSizeBase, const TwoBucketMetadata& startBucket) {
     int depth = 2;
     std::queue<TwoBucketMetadata> bucketQueue;
     bucketQueue.push(TwoBucketMetadata(startBucket));
 
     while (depth <= MAX_STEP) {
-      if (table_.GetTableSize() != tableSize) {
-        // throw exception?
-        return RESIZE;
-      }
+      TwoBucketMetadata& twoBucketMetadata = bucketQueue.back();
+      LockOne(twoBucketMetadata.GetN(1));
 
       // Poll last node from queue and get the second bucket index.
       // Based on second bucket index, find another bucket wihch is not equal to the first bucket index,
       // and that can move node, then create a CuckooPathNode, push the node to the end of queue.
 
+      // check here if after lock the table has been resize.
+      if (table_.GetTableSizeBase() != tableSizeBase) {
+        Unlock(twoBucketMetadata.GetN(1));
+        return CuckooStatusCode::RESIZE;
+      }
+
       // then what should be the next bucket?
       // the first choice is a bucket with empty slots, if find it, stop search and return, ready to swap.
       // If not, find a full bucket (in order or randomly), push to the end of queue, continue util depth exceeds threshold.
+
+      // try to find a bucket with empty slot.
+      Bucket& bucket = table_.GetBucket(twoBucketMetadata.GetN(1));
+      for (int i = 0; i < BUCKET_SIZE; i++) {
+        char partialKey = bucket.GetPartitialKey(i);
+        size_t pairIndex = AlternativeIndexOff(tableSizeBase, partialKey, twoBucketMetadata.GetN(1));
+
+        LockOne(pairIndex);
+        if (table_.GetTableSizeBase() != tableSizeBase) {
+          UnlockTwo(pairIndex, twoBucketMetadata.GetN(1));
+          return CuckooStatusCode::RESIZE;
+        }
+
+        if (table_.GetBucket(pairIndex).IfAvailable()) {\
+          bucketQueue.push()
+        }
+      }
+
+
     }
     return FULL;
   }
 
-  inline CuckooPathCode SwapCuckooPath() {
+  inline CuckooStatusCode SwapCuckooPath() {
 
   }
 
@@ -405,17 +430,17 @@ class CuckoohashingTable {
         auto indexes = SnapshotAndLockTwo(hashValue);
 
         // Acquired two locks, start insert now.
-        BucketInsertRetCode code;
+        CuckooStatusCode code;
         int index1, index2;
         code = CheckDuplicateBucket(indexes.GetN(0), key, index1);
 
-        if (code == BucketInsertRetCode::DUPLICATE) {
+        if (code == CuckooStatusCode::DUPLICATE) {
           return false;
         }
 
         code = CheckDuplicateBucket(indexes.GetN(1), key, index1);
 
-        if (code == BucketInsertRetCode::DUPLICATE) {
+        if (code == CuckooStatusCode::DUPLICATE) {
           return false;
         }
 
@@ -442,15 +467,15 @@ class CuckoohashingTable {
           // release locks
           indexes.Release();
 
-          CuckooPathCode code = SearchCuckooPath(indexes.GetTableSize(), indexes);
+          CuckooStatusCode code = SearchCuckooPath(indexes.GetTableSizeBase(), indexes);
 
-          if (code == MAXSTEP || code == FULL) {
+          if (code == CuckooStatusCode::MAXSTEP || code == CuckooStatusCode::FULL) {
             // do resize
             // and the throw a exception to restart
             // but how to make sure multi threads reszie the table at the same time.
             // hint: do check on tableSize when acquire all locks.
 
-          } else if (code == GOOD) {
+          } else if (code == CuckooStatusCode::OK) {
             SwapCuckooPath();
           } else {
             // what chould this one be?
@@ -461,7 +486,7 @@ class CuckoohashingTable {
         indexes.Release();
         return true;
       } catch(TableSizeException) {
-
+        continue;
       }
     }
   }
@@ -496,26 +521,44 @@ class CuckoohashingTable {
   };
 
   TwoBucketMetadata SnapshotAndLockTwo(size_t hashValue) {
-    size_t tableSize = table_.GetTableSizeBase();
-    size_t posFirst = IndexOff(tableSize, hashValue);
-    char paritial = PartialHashValue(hashValue);
-    size_t posSecond = AlternativeIndexOff(tableSize, paritial, posFirst);
+    while (true) {
+      size_t tableSizeBase = table_.GetTableSizeBase();
+      size_t posFirst = IndexOff(tableSizeBase, hashValue);
+      char paritial = PartialHashValue(hashValue);
+      size_t posSecond = AlternativeIndexOff(tableSizeBase, paritial, posFirst);
 
 
-    TwoBucketMetadata metadata;
-    metadata.AddBucket(0, posFirst);
-    metadata.AddBucket(1, posSecond);
-    metadata.AddTableSize(tableSize);
+      TwoBucketMetadata metadata;
+      metadata.AddBucket(0, posFirst);
+      metadata.AddBucket(1, posSecond);
+      metadata.AddTableSize(tableSizeBase);
 
-    if (!LockTwo(tableSize, posFirst, posSecond)) {
-      //return false? or throw a exception?
-      return metadata;
+      try {
+        return LockTwoAndReturnMetadata(tableSizeBase, posFirst, posSecond);
+      } catch (TableSizeException) {
+        continue;
+      }
     }
-
-    return metadata;
   };
 
-public:
+  TwoBucketMetadata LockTwoAndReturnMetadata(size_t tableSizeBase, size_t posFirst, size_t posSecond) {
+    if (posFirst > posSecond) {
+      std::swap(posFirst, posSecond);
+    }
+
+    locks_[posFirst].lock();
+    CheckTableSize(tableSizeBase, posFirst);
+    locks_[posSecond].lock();
+    return TwoBucketMetadata{this, posFirst, posSecond};
+  }
+
+  void CheckTableSize(size_t tableSize, size_t lockIndex) {
+    if (table_.GetTableSizeBase() != tableSize) {
+      locks_[lockIndex].unlock();
+      throw TableSizeException();
+    }
+  }
+
   bool LockTwo(size_t tableSizeBase, size_t posFirst, size_t posSecond) {
     locks_[posFirst].lock();
     if (table_.GetTableSizeBase() != tableSizeBase) {
@@ -528,9 +571,9 @@ public:
     return true;
   }
 
-  bool UnlockTwo(size_t posFirst, size_t posSecond) {
-    locks_[posFirst].unlock();
-    locks_[posSecond].unlock();
+  inline void UnlockTwo(size_t i, size_t j) {
+    locks_[i].unlock();
+    locks_[j].unlock();
   }
 
   bool Unlock(TwoBucketMetadata& twoBucketMetadata) {
@@ -548,6 +591,10 @@ public:
     locks_[twoBucketMetadata.GetN(1)].lock();
 
     return true;
+  }
+
+  bool LockOne(size_t i) {
+    locks_[i].lock();
   }
 
   void LockAll() {
