@@ -373,14 +373,16 @@ class CuckoohashingTable {
   }
 
 
-  inline CuckooStatusCode SearchCuckooPath(size_t tableSizeBase, const TwoBucketMetadata& startBucket) {
+  inline CuckooStatusCode SearchCuckooPath(size_t tableSizeBase,
+                                           const TwoBucketMetadata& startBucket,
+                                           std::queue<TwoBucketMetadata>& bucketQueue) {
     int depth = 2;
-    std::queue<TwoBucketMetadata> bucketQueue;
     bucketQueue.push(TwoBucketMetadata(startBucket));
 
     while (depth <= MAX_STEP) {
       TwoBucketMetadata& twoBucketMetadata = bucketQueue.back();
-      LockOne(twoBucketMetadata.GetN(1));
+      size_t bucketIndex = twoBucketMetadata.GetN(1);
+      LockOne(bucketIndex);
 
       // Poll last node from queue and get the second bucket index.
       // Based on second bucket index, find another bucket wihch is not equal to the first bucket index,
@@ -388,7 +390,7 @@ class CuckoohashingTable {
 
       // check here if after lock the table has been resize.
       if (table_.GetTableSizeBase() != tableSizeBase) {
-        Unlock(twoBucketMetadata.GetN(1));
+        Unlock(bucketIndex);
         return CuckooStatusCode::RESIZE;
       }
 
@@ -400,25 +402,30 @@ class CuckoohashingTable {
       Bucket& bucket = table_.GetBucket(twoBucketMetadata.GetN(1));
       for (int i = 0; i < BUCKET_SIZE; i++) {
         char partialKey = bucket.GetPartitialKey(i);
-        size_t pairIndex = AlternativeIndexOff(tableSizeBase, partialKey, twoBucketMetadata.GetN(1));
+        size_t pairIndex = AlternativeIndexOff(tableSizeBase, partialKey, bucketIndex);
 
         LockOne(pairIndex);
-        if (table_.GetTableSizeBase() != tableSizeBase) {
-          UnlockTwo(pairIndex, twoBucketMetadata.GetN(1));
-          return CuckooStatusCode::RESIZE;
+        // do not need to check tableSizeBase again because we have acquired a lock before.
+        if (table_.GetBucket(pairIndex).IfAvailable()) {
+          bucketQueue.push(TwoBucketMetadata{this, bucketIndex, pairIndex});
+          UnlockTwo(bucketIndex, pairIndex);
+          return CuckooStatusCode::OK;
+        } else if (i == BUCKET_SIZE - 1){
+          // last slot checked, no available buckets.
+          // better do random here, but not just do last one.
+          bucketQueue.push(TwoBucketMetadata{this, bucketIndex, pairIndex});
         }
 
-        if (table_.GetBucket(pairIndex).IfAvailable()) {\
-          bucketQueue.push()
-        }
+        Unlock(pairIndex);
       }
 
-
+      Unlock(bucketIndex);
     }
-    return FULL;
+
+    return CuckooStatusCode::MAXSTEP;
   }
 
-  inline CuckooStatusCode SwapCuckooPath() {
+  inline CuckooStatusCode SwapCuckooPath(std::queue<TwoBucketMetadata>& bucketQueue) {
 
   }
 
@@ -466,8 +473,9 @@ class CuckoohashingTable {
 
           // release locks
           indexes.Release();
+          std::queue<TwoBucketMetadata> bucketQueue;
 
-          CuckooStatusCode code = SearchCuckooPath(indexes.GetTableSizeBase(), indexes);
+          CuckooStatusCode code = SearchCuckooPath(indexes.GetTableSizeBase(), indexes, bucketQueue);
 
           if (code == CuckooStatusCode::MAXSTEP || code == CuckooStatusCode::FULL) {
             // do resize
@@ -475,10 +483,16 @@ class CuckoohashingTable {
             // but how to make sure multi threads reszie the table at the same time.
             // hint: do check on tableSize when acquire all locks.
 
+            // resize here
+
+
+            // then throw exception, aka retry.
+            throw TableSizeException();
           } else if (code == CuckooStatusCode::OK) {
-            SwapCuckooPath();
+            SwapCuckooPath(bucketQueue);
           } else {
             // what chould this one be?
+            // Possible no other .
           }
         }
 

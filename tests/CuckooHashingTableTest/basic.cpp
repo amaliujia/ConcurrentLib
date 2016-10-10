@@ -11,5 +11,6 @@ class CuckooHasingTableBasicTest : public ::testing::Test { };
 
 TEST_F(CuckooHasingTableBasicTest, BasicTest) {
   concurrent_lib::CuckoohashingTable<int, int> table;
+  //table.Insert(std::move(3), std::move(3));
   std::cout << table.Size() << std::endl;
 }
